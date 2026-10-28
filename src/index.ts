@@ -46,7 +46,7 @@ const defaultHandler = { async fetch(req: Request, env: Env): Promise<Response> 
       if (auth.scope.some(s=> ![SCOPE,'offline_access'].includes(s))) return new Response('Unsupported scope',{status:400});
       const details = await oauth.describeConsent(auth), consent = await oauth.beginConsent(auth);
       consent.headers.set('Content-Type','text/html; charset=utf-8');
-      consent.headers.set('Content-Security-Policy',"default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+      consent.headers.set('Content-Security-Policy',"default-src 'none'; form-action 'self' https://github.com; base-uri 'none'; frame-ancestors 'none'");
       return new Response(`<!doctype html><meta charset="utf-8"><title>GCB MCP authorization</title><h1>GCB MCP Personal</h1><p>Client: ${escape(details.clientName)}</p><p>Client domain: ${escape(details.clientDomain ?? 'Self-registered; unverified')}</p><p>Return to: ${escape(details.redirectHost)}</p><p>Only Steve-GCB (GitHub ID ${OWNER_ID}) is allowed.</p><p>Grant ${SCOPE}: greeting, send a DM to the owner, and read owner replies from RnD GPT.</p><form method="post"><input type="hidden" name="handle" value="${escape(consent.handle)}"><button name="decision" value="approve">Continue with GitHub</button><button name="decision" value="deny">Deny</button></form>`,{headers:consent.headers});
     }
     if (url.pathname === '/authorize' && req.method === 'POST') {
@@ -80,7 +80,17 @@ const defaultHandler = { async fetch(req: Request, env: Env): Promise<Response> 
     return new Response('Not found',{status:404});
   } catch(e) {
     if (e instanceof AuthorizationError && e.redirectTo) return Response.redirect(e.redirectTo,302);
-    if (e instanceof AuthorizationError || e instanceof CimdFetchError) return new Response('Invalid or expired authorization request. Start sign-in again.',{status:400});
+    if (e instanceof AuthorizationError || e instanceof CimdFetchError) {
+      // Fixed diagnostic labels only: never expose OAuth parameters, cookies or tokens.
+      const description = e instanceof AuthorizationError ? e.description : '';
+      const reason = e instanceof CimdFetchError ? 'client_metadata_unavailable'
+        : description.includes('not started in this browser') ? 'browser_cookie_missing'
+        : description.includes('different browser session') ? 'browser_cookie_mismatch'
+        : description.includes('expired or was already used') ? 'transaction_expired_or_unavailable'
+        : description.includes('Missing transaction handle') ? 'consent_handle_missing'
+        : description.includes('scopes') ? 'scope_rejected' : 'authorization_request_rejected';
+      return new Response(`Authorization could not continue (${reason}). Return to ChatGPT and start a fresh connection in the same browser. Do not reuse this page.`,{status:400,headers:{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
+    }
     return new Response('Authorization service unavailable',{status:503});
   }
 }};
