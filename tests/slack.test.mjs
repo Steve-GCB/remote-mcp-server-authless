@@ -8,7 +8,7 @@ const env={SLACK_BOT_TOKEN:'xoxb-test-only'};
 const identity={ok:true,team_id:'T067X1VPECV',bot_id:'BTEST',user_id:'UBOT',url:'https://example.slack.com/'};
 function fixture(overrides={}) {
  const calls=[];
- const call=async(url,options)=>{const method=url.split('/').pop();const data=JSON.parse(options.body);calls.push({method,data});
+ const call=async(url,options)=>{const u=new URL(url);const method=u.pathname.split('/').pop();const data=options.method==='GET'?Object.fromEntries(u.searchParams):JSON.parse(options.body);calls.push({method,data});
  const entry=overrides[method]; if(entry instanceof Error) throw entry;
  if(entry instanceof Response) return entry;
  const standard={'auth.test':identity,'conversations.open':{ok:true,channel:{id:'DTEST',is_im:true,user:'U07B419C2QG'}},'conversations.history':{ok:true,messages:[]},'chat.postMessage':{ok:true,channel:'DTEST',ts:'1793180000.000001'},'chat.getPermalink':{ok:true,permalink:'https://example.slack.com/archives/DTEST/p1793180000000001'}};
