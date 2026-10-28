@@ -1,0 +1,18 @@
+{
+  "name": "gcb-mcp-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "agents": "latest",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "wrangler": "4.145.0"
+  }
+}
