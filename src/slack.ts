@@ -13,9 +13,12 @@ export class SlackClient {
     try {
       // Native Workers fetch must not receive this SlackClient as its receiver.
       const call = this.call;
-      response = await call(`https://slack.com/api/${method}`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
-        body: JSON.stringify(data), signal: AbortSignal.timeout(12000)
+      const readMethod = ['conversations.history', 'conversations.replies', 'chat.getPermalink'].includes(method);
+      const url = new URL(`https://slack.com/api/${method}`);
+      if (readMethod) for (const [key, value] of Object.entries(data)) url.searchParams.set(key, String(value));
+      response = await call(url.href, {
+        method: readMethod ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
+        body: readMethod ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(12000)
       });
     } catch { throw new SlackFailure('transport_error_do_not_resend', undefined, write); }
     if (response.status === 429) throw new SlackFailure('ratelimited', Number(response.headers.get('retry-after')) || 60);
