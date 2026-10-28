@@ -11,7 +11,9 @@ export class SlackClient {
     if (!token?.startsWith('xoxb-')) throw new SlackFailure('bot_not_configured');
     let response: Response;
     try {
-      response = await this.call(`https://slack.com/api/${method}`, {
+      // Native Workers fetch must not receive this SlackClient as its receiver.
+      const call = this.call;
+      response = await call(`https://slack.com/api/${method}`, {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' },
         body: JSON.stringify(data), signal: AbortSignal.timeout(12000)
       });
