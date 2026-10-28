@@ -3,12 +3,10 @@
   "name": "gcb-mcp-test",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-02",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": true,
   "preview_urls": false,
-  "observability": {
-    "enabled": true
-  }
+  "observability": { "enabled": false },
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "3d6903d3f24c4ceb868e846db17d48ee" }],
+  "vars": { "GITHUB_CLIENT_ID": "Ov23liBcLKFyl33CwEvc" }
 }
