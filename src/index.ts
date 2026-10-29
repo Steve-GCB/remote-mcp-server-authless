@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 import OAuthProvider, { AuthorizationError, CimdFetchError, authorizationErrorRedirect, insufficientScope, type OAuthHelpers } from '@cloudflare/workers-oauth-provider';
-import { sendSlack, getReplies, safeSlackError } from './slack';
+import { sendSlack, getReplies, safeSlackError, SlackClient, SlackFailure, TEAM } from './slack';
 
 const ORIGIN = 'https://gcb-mcp-test.satoshi-yamashita.workers.dev';
 const RESOURCE = `${ORIGIN}/mcp`;
@@ -13,8 +13,48 @@ function isOwner(user: any): boolean { return String(user?.id) === OWNER_ID && u
 const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const textResult = (x: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(x) }] });
 const timestamp = z.string().regex(/^\d{10}\.\d{6}$/);
+// Notification destinations are deliberately limited to the owner's two private channels.
+const NOTICE_CHANNELS = ['C0CD27Q9XPX', 'C0CD19PN37D'] as const;
+const noticeAttempts = new Map<string, { fingerprint: string; result?: unknown; expires: number }>();
+export type Notice = { channel_id: string; text: string; idempotency_key: string; thread_ts?: string };
+export async function sendNotice(env: Pick<Env, 'SLACK_BOT_TOKEN'>, input: Notice, call: typeof fetch = fetch) {
+  if (!(NOTICE_CHANNELS as readonly string[]).includes(input.channel_id)) throw new SlackFailure('notice_channel_not_allowed');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.idempotency_key)) throw new SlackFailure('invalid_idempotency_key');
+  if (!input.text.trim() || input.text.length > 2500) throw new SlackFailure('invalid_notice_text');
+  if (input.thread_ts && !/^\d{10}\.\d{6}$/.test(input.thread_ts)) throw new SlackFailure('invalid_thread_ts');
+  const fingerprint = JSON.stringify([input.channel_id, input.thread_ts ?? null, input.text]);
+  const now = Date.now();
+  for (const [key, value] of noticeAttempts) if (value.expires < now) noticeAttempts.delete(key);
+  const old = noticeAttempts.get(input.idempotency_key);
+  if (old) {
+    if (old.fingerprint !== fingerprint) throw new SlackFailure('idempotency_key_conflict');
+    if (old.result) return { ...(old.result as object), duplicate: true };
+    throw new SlackFailure('previous_attempt_pending_or_unknown_do_not_resend', undefined, true);
+  }
+  if (noticeAttempts.size >= 1000) throw new SlackFailure('too_many_pending_attempts');
+  // This cache is only an isolate-local guard. The coordinator must persist send intents
+  // and reconcile the visible marker via the Slack plugin before any cross-run retry.
+  noticeAttempts.set(input.idempotency_key, { fingerprint, expires: now + 86400000 });
+  const slack = new SlackClient(env, call);
+  const identity = await slack.api('auth.test');
+  if (identity.team_id !== TEAM || identity.user_id !== 'U0CCMCB5T2R' || !identity.bot_id) throw new SlackFailure('wrong_notice_bot');
+  const base = new URL(identity.url);
+  if (base.protocol !== 'https:' || !base.hostname.endsWith('.slack.com')) throw new SlackFailure('unexpected_workspace_url');
+  const text = input.text + '\n_AIOS notice: ' + input.idempotency_key + '_';
+  const sent = await slack.api('chat.postMessage', {
+    channel: input.channel_id, text, client_msg_id: input.idempotency_key,
+    ...(input.thread_ts ? { thread_ts: input.thread_ts, reply_broadcast: false } : {}),
+    unfurl_links: false, unfurl_media: false, parse: 'none'
+  }, true);
+  if (sent.channel !== input.channel_id || !/^\d{10}\.\d{6}$/.test(sent.ts)) throw new SlackFailure('unexpected_send_result_do_not_resend', undefined, true);
+  const result = { channel: sent.channel, ts: sent.ts, thread_ts: input.thread_ts ?? sent.ts,
+    permalink: `${base.origin}/archives/${sent.channel}/p${sent.ts.replace('.', '')}`,
+    bot_user_id: identity.user_id, idempotency_key: input.idempotency_key, duplicate: false };
+  noticeAttempts.get(input.idempotency_key)!.result = result;
+  return result;
+}
 function createServer(env: Env) {
-  const server = new McpServer({ name: 'GCB MCP Test', version: '2.0.0' });
+  const server = new McpServer({ name: 'GCB MCP Test', version: '2.1.0' });
   const securitySchemes = [{ type: 'oauth2', scopes: [SCOPE] }];
   server.registerTool('hello', { description: 'Returns a greeting only.', inputSchema: z.object({ name: z.string().max(100).optional() }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, _meta: { securitySchemes } },
@@ -27,6 +67,11 @@ function createServer(env: Env) {
     inputSchema: z.object({ after_ts:timestamp.optional(), thread_ts:timestamp.optional(), limit:z.number().int().min(1).max(10).optional() }).strict(),
     annotations: { readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:true }, _meta:{ securitySchemes } },
     async (input) => { try { return textResult(await getReplies(env,input)); } catch(e) { return { ...textResult(safeSlackError(e)), isError:true }; } });
+  server.registerTool('send_slack_notice', {
+    description: 'Send an RnD GPT Bot notice to the two owner-private notification channels only. Optional thread_ts appends to the existing semantic-work thread. Persist a fresh UUID send intent before calling. On any error or unknown delivery, reconcile the AIOS notice marker with the standard Slack plugin; never blindly retry. Read owner replies using the Slack plugin, not this tool.',
+    inputSchema: z.object({ channel_id:z.enum(NOTICE_CHANNELS), text:z.string().trim().min(1).max(2500), idempotency_key:z.uuid(), thread_ts:timestamp.optional() }).strict(),
+    annotations: { readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true }, _meta:{securitySchemes}
+  }, async (input) => { try { return textResult(await sendNotice(env,input)); } catch(e) { return {...textResult(safeSlackError(e)),isError:true}; } });
   return server;
 }
 const apiHandler = { async fetch(request: Request, env: Env, ctx: any) {
@@ -47,7 +92,7 @@ const defaultHandler = { async fetch(req: Request, env: Env): Promise<Response> 
       const details = await oauth.describeConsent(auth), consent = await oauth.beginConsent(auth);
       consent.headers.set('Content-Type','text/html; charset=utf-8');
       consent.headers.set('Content-Security-Policy',"default-src 'none'; form-action 'self' https://github.com; base-uri 'none'; frame-ancestors 'none'");
-      return new Response(`<!doctype html><meta charset="utf-8"><title>GCB MCP authorization</title><h1>GCB MCP Personal</h1><p>Client: ${escape(details.clientName)}</p><p>Client domain: ${escape(details.clientDomain ?? 'Self-registered; unverified')}</p><p>Return to: ${escape(details.redirectHost)}</p><p>Only Steve-GCB (GitHub ID ${OWNER_ID}) is allowed.</p><p>Grant ${SCOPE}: greeting, send a DM to the owner, and read owner replies from RnD GPT.</p><form method="post"><input type="hidden" name="handle" value="${escape(consent.handle)}"><button name="decision" value="approve">Continue with GitHub</button><button name="decision" value="deny">Deny</button></form>`,{headers:consent.headers});
+      return new Response(`<!doctype html><meta charset="utf-8"><title>GCB MCP authorization</title><h1>GCB MCP Personal</h1><p>Client: ${escape(details.clientName)}</p><p>Client domain: ${escape(details.clientDomain ?? 'Self-registered; unverified')}</p><p>Return to: ${escape(details.redirectHost)}</p><p>Only Steve-GCB (GitHub ID ${OWNER_ID}) is allowed.</p><p>Grant ${SCOPE}: greeting, owner DM, owner replies, and RnD GPT notices in the two designated owner-private channels.</p><form method="post"><input type="hidden" name="handle" value="${escape(consent.handle)}"><button name="decision" value="approve">Continue with GitHub</button><button name="decision" value="deny">Deny</button></form>`,{headers:consent.headers});
     }
     if (url.pathname === '/authorize' && req.method === 'POST') {
       if (req.headers.get('origin') !== ORIGIN) return new Response('Forbidden',{status:403});
