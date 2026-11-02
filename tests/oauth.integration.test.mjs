@@ -20,7 +20,42 @@ try {
  const resource=await(await request('/.well-known/oauth-protected-resource/mcp')).json();assert.equal(resource.resource,RESOURCE);passed.push('resource metadata');
  const registration=await(await request('/oauth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'GCB integration test',redirect_uris:['http://127.0.0.1:9876/callback'],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']})})).json();assert(registration.client_id);passed.push('DCR');
  const verifier='v'.repeat(64);const challenge=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))).toString('base64url');
- async function authorize(allowed=true){owner=allowed;cookies.clear();const q=new URLSearchParams({response_type:'code',client_id:registration.client_id,redirect_uri:'http://127.0.0.1:9876/callback',scope:'mcp:use offline_access',state:'test-state',resource:RESOURCE,code_challenge:challenge,code_challenge_method:'S256'});let r=await request('/authorize?'+q);assert.equal(r.status,200);const html=await r.text();const handle=html.match(/name="handle" value="([^"]+)"/)[1];r=await request('/authorize',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Origin:ORIGIN},body:new URLSearchParams({handle,decision:'approve'})});assert.equal(r.status,302,await r.clone().text());const upstream=new URL(r.headers.get('location'));r=await request('/github/callback?'+new URLSearchParams({state:upstream.searchParams.get('state'),code:'test-code'}));assert.equal(r.status,302);return new URL(r.headers.get('location'));}
+ async function startConsent(extra={}) {
+  cookies.clear();
+  const q=new URLSearchParams({response_type:'code',client_id:registration.client_id,redirect_uri:'http://127.0.0.1:9876/callback',scope:'mcp:use offline_access',state:'test-state',resource:RESOURCE,code_challenge:challenge,code_challenge_method:'S256',...extra});
+  const r=await request('/authorize?'+q);assert.equal(r.status,200);
+  assert.equal(r.headers.get('cache-control'),'no-store');
+  const csp=r.headers.get('content-security-policy');
+  assert.equal(csp,"default-src 'none'; form-action 'self' https://github.com http://127.0.0.1:9876; base-uri 'none'; frame-ancestors 'none'");
+  for(const cookie of r.headers.getSetCookie()) {
+   for(const flag of ['Path=/','Secure','HttpOnly','SameSite=Lax','Max-Age=600']) assert(cookie.includes(flag));
+   assert(!/;\s*Domain=/i.test(cookie));
+  }
+  const html=await r.text();assert(!/http-equiv=["']Content-Security-Policy/i.test(html));assert(html.includes('<form method="post">'));
+  return html.match(/name="handle" value="([^"]+)"/)[1];
+ }
+ async function postConsent(handle,decision='approve',origin=ORIGIN,extra={}) {
+  return request('/authorize',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Origin:origin},body:new URLSearchParams({handle,decision,...extra})});
+ }
+ let handle=await startConsent({return_to:'https://untrusted.example'});
+ const binding=[...cookies];cookies.clear();r=await postConsent(handle);assert.equal(r.status,400);assert.match(await r.text(),/browser_cookie_missing/);
+ for(const [k,v] of binding) cookies.set(k,v);
+ r=await postConsent(handle,'approve','https://untrusted.example');assert.equal(r.status,403);
+ r=await postConsent(handle,'approve',ORIGIN,{redirect_uri:'https://untrusted.example'});assert.equal(r.status,302);
+ const upstreamURL=new URL(r.headers.get('location'));assert.equal(upstreamURL.origin,'https://github.com');assert.equal(upstreamURL.pathname,'/login/oauth/authorize');assert.equal(upstreamURL.searchParams.get('redirect_uri'),ORIGIN+'/github/callback');assert.equal(upstreamURL.searchParams.get('code_challenge_method'),'S256');
+ assert(r.headers.getSetCookie().some(c=>c.includes('Max-Age=0')));assert(r.headers.getSetCookie().some(c=>c.includes('Max-Age=600')));
+ r=await postConsent(handle);assert.equal(r.status,400);assert.match(await r.text(),/browser_cookie_missing/);
+ passed.push('validated redirect origin in CSP; secure host-only cookies; CSRF and consumed-cookie replay rejected');
+ r=await request('/github/callback?'+new URLSearchParams({state:upstreamURL.searchParams.get('state'),error:'access_denied'}));assert.equal(r.status,302);assert.equal(new URL(r.headers.get('location')).searchParams.get('error'),'access_denied');
+ r=await request('/github/callback?'+new URLSearchParams({state:upstreamURL.searchParams.get('state'),code:'test-code'}));assert.equal(r.status,400);
+ handle=await startConsent();r=await postConsent(handle,'deny',ORIGIN,{redirect_uri:'https://untrusted.example'});assert.equal(r.status,302);assert.equal(new URL(r.headers.get('location')).origin,'http://127.0.0.1:9876');
+ passed.push('GitHub denial and callback replay; consent denial uses stored validated redirect');
+ const chatClient=await(await request('/oauth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'ChatGPT redirect fixture',redirect_uris:['https://chatgpt.com/connector_platform_oauth_redirect'],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']})})).json();assert(chatClient.client_id);
+ const chatQuery=new URLSearchParams({response_type:'code',client_id:chatClient.client_id,redirect_uri:'https://chatgpt.com/connector_platform_oauth_redirect',scope:'mcp:use',state:'chat-fixture',resource:RESOURCE,code_challenge:challenge,code_challenge_method:'S256'});
+ cookies.clear();r=await request('/authorize?'+chatQuery);assert.equal(r.status,200);assert.equal(r.headers.get('content-security-policy'),"default-src 'none'; form-action 'self' https://github.com https://chatgpt.com; base-uri 'none'; frame-ancestors 'none'");
+ handle=(await r.text()).match(/name="handle" value="([^"]+)"/)[1];r=await postConsent(handle,'deny');assert.equal(r.status,302);assert.equal(new URL(r.headers.get('location')).origin,'https://chatgpt.com');
+ chatQuery.set('redirect_uri','https://untrusted.example/callback');r=await request('/authorize?'+chatQuery);assert(r.status>=400);passed.push('ChatGPT return origin allowed; unregistered redirect rejected (local fixture)');
+ async function authorize(allowed=true){owner=allowed;const handle=await startConsent();let r=await postConsent(handle);assert.equal(r.status,302,await r.clone().text());const upstream=new URL(r.headers.get('location'));r=await request('/github/callback?'+new URLSearchParams({state:upstream.searchParams.get('state'),code:'test-code'}));assert.equal(r.status,302);return new URL(r.headers.get('location'));}
  const denied=await authorize(false);assert.equal(denied.searchParams.get('error'),'access_denied');passed.push('third-party GitHub ID denied');
  const approved=await authorize(true);assert.equal(approved.searchParams.get('state'),'test-state');assert.equal(approved.searchParams.get('iss'),ORIGIN);
  async function token(data){return request('/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(data)});}
@@ -31,6 +66,9 @@ try {
  const invalid=await client.callTool({name:'send_slack',arguments:{text:'NO SEND',idempotency_key:crypto.randomUUID(),user_id:'UOTHER'}});assert(invalid.isError);const invalidRead=await client.callTool({name:'get_slack_replies',arguments:{channel:'COTHER'}});assert(invalidRead.isError);passed.push('unknown recipient/channel inputs rejected');await client.close();
  r=await token({grant_type:'refresh_token',client_id:registration.client_id,refresh_token:tokens.refresh_token,resource:'https://other.example/mcp'});assert.equal(r.status,400);passed.push('wrong refresh audience rejected');
  r=await token({grant_type:'refresh_token',client_id:registration.client_id,refresh_token:tokens.refresh_token,resource:RESOURCE,scope:'offline_access'});assert.equal(r.status,200);const narrowed=await r.json();r=await request('/mcp',{method:'POST',headers:{Authorization:'Bearer '+narrowed.access_token,'Content-Type':'application/json'},body:'{}'});assert.equal(r.status,403);passed.push('scope insufficiency 403, refresh works');
+ const recovery=await authorize(true);r=await token({grant_type:'authorization_code',client_id:registration.client_id,code:recovery.searchParams.get('code'),redirect_uri:'http://127.0.0.1:9876/callback',code_verifier:verifier,resource:RESOURCE});assert.equal(r.status,200);const recoveryTokens=await r.json();
  await request('/__test/expire');r=await request('/mcp',{headers:{Authorization:'Bearer '+tokens.access_token}});assert.equal(r.status,401);passed.push('expired access token 401 (test clock only)');
+ r=await token({grant_type:'refresh_token',client_id:registration.client_id,refresh_token:recoveryTokens.refresh_token,resource:RESOURCE});assert.equal(r.status,200);const renewed=await r.json();assert(renewed.access_token&&renewed.refresh_token);assert.notEqual(renewed.refresh_token,recoveryTokens.refresh_token);
+ const renewedClient=new Client({name:'gcb-refresh-test',version:'1'});await renewedClient.connect(new StreamableHTTPClientTransport(new URL(RESOURCE),{fetch:async(url,options={})=>{const headers=new Headers(options.headers);headers.set('Host',new URL(ORIGIN).hostname);headers.set('Authorization','Bearer '+renewed.access_token);return worker.fetch(String(url),{...options,headers:Object.fromEntries(headers)});}}));assert.equal((await renewedClient.callTool({name:'hello',arguments:{name:'GCB'}})).content[0].text,'Hello, GCB!');await renewedClient.close();passed.push('expired access recovered by rotated refresh token and MCP hello');
  console.log(JSON.stringify({passed},null,2));
 }finally {await mf.dispose();}
