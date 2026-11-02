@@ -91,7 +91,10 @@ const defaultHandler = { async fetch(req: Request, env: Env): Promise<Response> 
       if (auth.scope.some(s=> ![SCOPE,'offline_access'].includes(s))) return new Response('Unsupported scope',{status:400});
       const details = await oauth.describeConsent(auth), consent = await oauth.beginConsent(auth);
       consent.headers.set('Content-Type','text/html; charset=utf-8');
-      consent.headers.set('Content-Security-Policy',"default-src 'none'; form-action 'self' https://github.com; base-uri 'none'; frame-ancestors 'none'");
+      // Chromium checks the entire form redirect chain, including the final OAuth client.
+      // Use only the redirect URI already validated by parseAuthRequest, never a form value.
+      const returnOrigin = new URL(details.redirectUri).origin;
+      consent.headers.set('Content-Security-Policy',`default-src 'none'; form-action 'self' https://github.com ${returnOrigin}; base-uri 'none'; frame-ancestors 'none'`);
       return new Response(`<!doctype html><meta charset="utf-8"><title>GCB MCP authorization</title><h1>GCB MCP Personal</h1><p>Client: ${escape(details.clientName)}</p><p>Client domain: ${escape(details.clientDomain ?? 'Self-registered; unverified')}</p><p>Return to: ${escape(details.redirectHost)}</p><p>Only Steve-GCB (GitHub ID ${OWNER_ID}) is allowed.</p><p>Grant ${SCOPE}: greeting, owner DM, owner replies, and RnD GPT notices in the two designated owner-private channels.</p><form method="post"><input type="hidden" name="handle" value="${escape(consent.handle)}"><button name="decision" value="approve">Continue with GitHub</button><button name="decision" value="deny">Deny</button></form>`,{headers:consent.headers});
     }
     if (url.pathname === '/authorize' && req.method === 'POST') {
