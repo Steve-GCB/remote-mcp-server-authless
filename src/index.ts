@@ -13,8 +13,8 @@ function isOwner(user: any): boolean { return String(user?.id) === OWNER_ID && u
 const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const textResult = (x: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(x) }] });
 const timestamp = z.string().regex(/^\d{10}\.\d{6}$/);
-// Notification destinations are deliberately limited to the owner's two private channels.
-const NOTICE_CHANNELS = ['C0CD27Q9XPX', 'C0CD19PN37D'] as const;
+// Notification destinations are validated from the single canonical configuration.
+import { NOTICE_CHANNELS, NOTICE_DESCRIPTION } from './notice-config';
 const noticeAttempts = new Map<string, { fingerprint: string; result?: unknown; expires: number }>();
 export type Notice = { channel_id: string; text: string; idempotency_key: string; thread_ts?: string };
 export async function sendNotice(env: Pick<Env, 'SLACK_BOT_TOKEN'>, input: Notice, call: typeof fetch = fetch) {
@@ -68,7 +68,7 @@ function createServer(env: Env) {
     annotations: { readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:true }, _meta:{ securitySchemes } },
     async (input) => { try { return textResult(await getReplies(env,input)); } catch(e) { return { ...textResult(safeSlackError(e)), isError:true }; } });
   server.registerTool('send_slack_notice', {
-    description: 'Send an RnD GPT Bot notice to the two owner-private notification channels only. Optional thread_ts appends to the existing semantic-work thread. Persist a fresh UUID send intent before calling. On any error or unknown delivery, reconcile the AIOS notice marker with the standard Slack plugin; never blindly retry. Read owner replies using the Slack plugin, not this tool.',
+    description: NOTICE_DESCRIPTION,
     inputSchema: z.object({ channel_id:z.enum(NOTICE_CHANNELS), text:z.string().trim().min(1).max(2500), idempotency_key:z.uuid(), thread_ts:timestamp.optional() }).strict(),
     annotations: { readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true }, _meta:{securitySchemes}
   }, async (input) => { try { return textResult(await sendNotice(env,input)); } catch(e) { return {...textResult(safeSlackError(e)),isError:true}; } });
