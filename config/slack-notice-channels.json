@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "channels": [
+    {
+      "id": "C0CD27Q9XPX",
+      "name": "rnd-ai-progress",
+      "lane": "work",
+      "description": "Workの進捗"
+    },
+    {
+      "id": "C0CD19PN37D",
+      "name": "rnd-ai-decisions",
+      "lane": "work",
+      "description": "Workの判断事項"
+    },
+    {
+      "id": "C0CGJ7Z11SR",
+      "name": "personal-ai-progress",
+      "lane": "personal",
+      "description": "Personalのタスク・進捗"
+    },
+    {
+      "id": "C0CHHTPHZT2",
+      "name": "ai-finance",
+      "lane": "finance",
+      "description": "Financeの進捗・定期要約"
+    }
+  ]
+}
